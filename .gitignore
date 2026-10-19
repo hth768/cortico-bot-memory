@@ -1,0 +1,5 @@
+node_modules/
+.npmrc
+_gen_describe.mjs
+*.log
+.DS_Store

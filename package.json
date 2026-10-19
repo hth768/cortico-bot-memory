@@ -1,0 +1,58 @@
+{
+  "name": "cortico-bot-memory",
+  "version": "0.1.1",
+  "description": "Cortico bot 模板:在 Persona 层面复现五层长期记忆(事实库/知识库/反思/人格/档案 + 三级底座 + 混合检索),记忆归 bot 私有,经系统前缀注入、对话实时沉淀,无需 world。",
+  "type": "module",
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "bot",
+    "api": 7,
+    "displayName": "长期记忆",
+    "tags": [
+      "memory"
+    ],
+    "describe": "describe.json",
+    "locales": {
+      "zh": {
+        "displayName": "长期记忆",
+        "description": "Cortico bot 扩展：在 Persona 层面复现五层长期记忆（事实库 / 知识库 / 反思 / 人格 / 档案 + 三级底座 + 混合检索），记忆归 bot 私有，经系统前缀注入、对话实时沉淀，无需 world。"
+      },
+      "en": {
+        "displayName": "Long-term Memory",
+        "description": "A Cortico bot extension that replicates a five-layer long-term memory system at the Persona level (fact base / knowledge base / reflection / persona / profile + three-tier base + hybrid retrieval). Memory is bot-private, injected via the system prefix and accumulated live from conversations, with no world required."
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test/bot.test.ts"
+  },
+  "keywords": [
+    "cortico-bot",
+    "cortico-kit",
+    "memory",
+    "memory-management",
+    "agent-memory",
+    "bm25",
+    "embedding"
+  ],
+  "author": "hth768",
+  "license": "MIT",
+  "homepage": "https://github.com/hth768/cortico-bot-memory",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hth768/cortico-bot-memory.git"
+  },
+  "files": [
+    "src",
+    "describe.json",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
