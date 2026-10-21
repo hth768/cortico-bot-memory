@@ -1,6 +1,6 @@
 {
   "name": "cortico-bot-memory",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Cortico bot 模板:在 Persona 层面复现五层长期记忆(事实库/知识库/反思/人格/档案 + 三级底座 + 混合检索),记忆归 bot 私有,经系统前缀注入、对话实时沉淀,无需 world。",
   "type": "module",
   "main": "./src/index.ts",

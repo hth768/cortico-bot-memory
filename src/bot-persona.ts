@@ -5,7 +5,7 @@ import { MEMORY_DEFAULTS, type MemoryConfig } from './config.ts';
 import { MemoryBase } from './memory.ts';
 import { EmbeddingClient } from './embedding.ts';
 import { VectorStore } from './vector-store.ts';
-import { FactStore } from './fact-store.ts';
+import { FactStore, FACT_TEXT_MAX } from './fact-store.ts';
 import { KnowledgeStore } from './knowledge-store.ts';
 import { ReflectionStore } from './reflection-store.ts';
 import { PersonaStore } from './persona-store.ts';
@@ -140,11 +140,23 @@ function cleanCaptureText(t: string): string {
   return (t ?? '').replace(/\s+/g, ' ').trim();
 }
 
-/** 自动捕获时判断事件是否为「真人入站消息」(只认 origin='external' + 非 bot 自言)。 */
+/**
+ * 自动捕获时判断事件是否为「真人入站消息」。
+ * 仅认 origin='external' + 非 bot 自言(对齐 world 0.2.5 的捕获过滤黑名单)。
+ */
 function isInboundUser(e: EventEnvelope): boolean {
   if (e.origin !== 'external') return false; // 排除 internal 回灌 / 记忆自身推送
   const role = (e.meta?.role as string) ?? '';
   if (role === 'assistant' || role === 'bot' || e.meta?.self === true) return false; // 排除 bot 自己
+  // 0.2.5 黑名单:非真人信号(自言/回执/桌宠互动/交接笔记)
+  const senderKey: string | undefined = typeof e.senderKey === 'string' ? e.senderKey : undefined;
+  const kind: string | undefined = e.meta?.kind as string | undefined;
+  const source: string | undefined = typeof e.source === 'string' ? e.source : undefined;
+  const type: string | undefined = typeof e.type === 'string' ? e.type : undefined;
+  if (senderKey && /\.self$/.test(senderKey)) return false;
+  if (kind === 'activity' || kind === 'delivered') return false;
+  if (source === 'desktop-pet' && type === 'desktop-pet.touch') return false;
+  if (type === 'persona' || senderKey === 'persona') return false;
   return true;
 }
 
@@ -194,6 +206,8 @@ export class BotMemoryPersona implements Persona {
   private profile!: ProfileStore;
   private embedder!: EmbeddingClient;
   private backend!: StoreBackend;
+  private backfillTimer: ReturnType<typeof setTimeout> | null = null;
+  private backfillIntervalMs = 30000;
 
   constructor(opts: BotMemoryPersonaOptions) {
     this.memoryDir = opts.memoryDir;
@@ -229,6 +243,7 @@ export class BotMemoryPersona implements Persona {
       const ok = await this.embedder.sidecarHealthy();
       this.log(`sidecar 探测: ${ok === true ? '在线' : '不在线(只用 BM25)'}`);
     }
+    if (this.vectors.pendingVectors().length) this.scheduleBackfill(30000);
   }
 
   attach(core: CoreApi): void | Promise<void> {
@@ -265,11 +280,15 @@ export class BotMemoryPersona implements Persona {
     let captured = 0;
     for (const e of events ?? []) {
       if (!isInboundUser(e)) continue;
-      const text = cleanCaptureText(e.text ?? '');
+      const text = cleanCaptureText(e.text ?? '').slice(0, FACT_TEXT_MAX);
       if (text.length < (this.cfg.captureMinLength ?? 2)) continue;
       const scope = scopeOfEvent(e);
-      this.facts.add(scope, [text]);
-      const vec = this.cfg.embeddingProvider === 'off' ? null : await this.embedder.embed(text);
+      const added = this.facts.add(scope, [text]);
+      if (!added) continue; // 事实已存在则跳过 embed/向量(避免重复 embed 与向量堆积)
+      let vec: number[] | null = null;
+      if (this.cfg.embeddingProvider !== 'off') {
+        try { vec = await this.embedder.embed(text); } catch { vec = null; }
+      }
       this.vectors.add(scope, text, vec, this.cfg.maxVectorsPerScope);
       captured++;
     }
@@ -281,6 +300,25 @@ export class BotMemoryPersona implements Persona {
     return {
       memory: {
         title: '记忆',
+        storage: [
+          {
+            key: 'capture-pollution',
+            label: '清理捕获污染（非真人消息）',
+            kind: 'memory',
+            danger: true,
+            note: this.capturePollutionPreview(),
+            stat: () => {
+              const bad = this.facts.listScopes().filter((s) => this.isSuspectScope(s));
+              const total = bad.reduce((a, s) => a + this.facts.count(s), 0);
+              return `疑似 ${total} 条 / 共 ${this.facts.count()} 条`;
+            },
+            clear: () => {
+              const bad = this.facts.listScopes().filter((s) => this.isSuspectScope(s));
+              const removed = this.facts.purge(bad);
+              return `OK 已清理 ${removed} 条非真人污染(${bad.length} 个 scope)。其余数据未动。`;
+            },
+          },
+        ],
         panels: [
           { type: 'text', key: 'stats', title: '记忆统计', refresh: 'auto', invoke: () => this.statsText() },
           { type: 'search', key: 'search', title: '回忆 / 检索', placeholder: '输入想回忆的内容…', invoke: (_p: any, a: any) => this.runRecall(String(a?.query ?? ''), 10, 'main') },
@@ -351,6 +389,51 @@ export class BotMemoryPersona implements Persona {
   private knowledgeList(): Array<{ title: string; subtitle?: string }> {
     const entries = (this.kb as any).entries ?? [];
     return entries.map((e: any) => ({ title: e.topic ?? '(未命名)', subtitle: `${(e.facts ?? []).length} 条事实` }));
+  }
+
+  /** 判定一个记忆域是否为「疑似非真人污染」(self/persona/桌宠互动等)。 */
+  private isSuspectScope(s: string): boolean {
+    return /\.self$/.test(s) || s === 'persona' || s.includes('.touch') ||
+      (s.startsWith('desktop-pet.') && !s.endsWith('.chat'));
+  }
+
+  /** 生成捕获污染预览文案(供 mem_purge_capture 与 WebUI 清理按钮共用)。 */
+  private capturePollutionPreview(): string {
+    const scopes = this.facts.listScopes();
+    const bad = scopes.filter((s) => this.isSuspectScope(s));
+    if (!bad.length) return '未发现疑似非真人（self/persona/touch/desktop-pet 互动）污染 scope。';
+    const lines = bad.map((s) => `- ${s}: ${this.facts.count(s)} 条`);
+    const total = bad.reduce((a, s) => a + this.facts.count(s), 0);
+    return `**总数 ${total} 条 / 共 ${this.facts.count()} 条**\n${lines.join('\n')}\n\n点击确认将只删除上述疑似 scope,其他数据不动。`;
+  }
+
+  /** 后台回填:为已捕获但未生成向量的事实补算嵌入。无待处理项时自动停止。 */
+  private async backfillVectors(limitPerRound = 20): Promise<number> {
+    const pending = this.vectors.pendingVectors(limitPerRound);
+    if (!pending.length) { this.stopBackfill(); return 0; }
+    for (const { scope, index, text } of pending) {
+      const vec = this.cfg.embeddingProvider === 'off' ? null : await this.embedder.embed(text);
+      this.vectors.setVector(scope, index, vec);
+    }
+    return pending.length;
+  }
+
+  private scheduleBackfill(delayMs: number): void {
+    if (this.backfillTimer) return;
+    this.backfillTimer = setTimeout(async () => {
+      this.backfillTimer = null;
+      try {
+        const done = await this.backfillVectors();
+        if (done > 0) this.scheduleBackfill(this.backfillIntervalMs);
+      } catch {
+        /* 单轮失败忽略,下轮重试 */
+      }
+    }, delayMs);
+    this.backfillTimer.unref?.();
+  }
+
+  private stopBackfill(): void {
+    if (this.backfillTimer) { clearTimeout(this.backfillTimer); this.backfillTimer = null; }
   }
 
   // ---- 记忆 I/O(导出/迁入,与 world 版共用同一规范) ----
@@ -442,9 +525,12 @@ export class BotMemoryPersona implements Persona {
       mem_remember: mk('mem_remember', '把一件值得长期记住的事写进记忆库(同时落「事实库」做去重重排 + 建向量索引,之后 mem_recall 可按语义找回)。', { text: str('内容'), scope: str('记忆域') }, ['text'], ['write'],
         async (a) => {
           const scope = scopeOf(a);
-          const text = String(a.text);
+          const text = String(a.text).slice(0, FACT_TEXT_MAX);
           const added = self.facts.add(scope, [text]);
-          self.vectors.add(scope, text, self.cfg.embeddingProvider === 'off' ? null : await self.embedder.embed(text), self.cfg.maxVectorsPerScope);
+          if (added) {
+            const vec = self.cfg.embeddingProvider === 'off' ? null : await self.embedder.embed(text);
+            self.vectors.add(scope, text, vec, self.cfg.maxVectorsPerScope);
+          }
           return added ? `OK 已记住(${scope}): ${text.slice(0, 80)}` : `OK 已存在,跳过重复(${scope})`;
         }),
       mem_recall: mk('mem_recall', '按语义+关键词混合检索长期记忆(事实库全文 + BM25+向量+RRF 融合)。scope 留空或填 main = 跨全部记忆域;填具体 scope 只搜该域;可填 qq:<QQ号> 检索某人在私聊与群聊里统一沉淀的记忆。', { query: str('查询'), top_k: num('条数'), scope: str('记忆域(留空=全部)') }, ['query'], ['read'],
@@ -591,6 +677,25 @@ export class BotMemoryPersona implements Persona {
           if (!p) return { text: '错误：必须提供 path(导出文件路径)。' } as any;
           const mode: ImportMode = args.mode === 'replace' ? 'replace' : 'merge';
           return await self.importBundle(p, mode);
+        }),
+      mem_backfill: mk('mem_backfill', '对已捕获但未生成嵌入向量的事实补算向量(用于嵌入提供方离线/故障后的回填)。可选 limit 限制本轮条数,默认 20。', { limit: num('本轮最多处理条数') }, [],
+        async (a) => {
+          const n = Number(a.limit);
+          const done = await self.backfillVectors(Number.isFinite(n) && n > 0 ? n : 20);
+          self.scheduleBackfill(self.backfillIntervalMs);
+          return `OK 回填完成 ${done} 条;剩余待处理 ${self.vectors.pendingVectors().length} 条。`;
+        }),
+      mem_purge_capture: mk('mem_purge_capture', '预览并清理被误当作入站用户消息的非真人数据(如 self/persona/桌宠互动)。不传 confirm 仅预览;confirm=1 才真正删除疑似 scope。', { confirm: num('传 1 才真正删除;缺省或 0 只预览') }, [],
+        async (a) => {
+          const bad = self.facts.listScopes().filter((s) => self.isSuspectScope(s));
+          if (!bad.length) return '未发现疑似非真人污染 scope,无需清理。';
+          const total = bad.reduce((acc, s) => acc + self.facts.count(s), 0);
+          if (a.confirm !== 1) {
+            const lines = bad.map((s) => `- ${s}: ${self.facts.count(s)} 条`);
+            return `【预览】疑似 ${total} 条 / 共 ${self.facts.count()} 条,将要删除以下 scope(传 confirm=1 才执行):\n${lines.join('\n')}`;
+          }
+          const removed = self.facts.purge(bad);
+          return `OK 已清理 ${removed} 条非真人污染(${bad.length} 个 scope)。其余数据未动。`;
         }),
     };
   }

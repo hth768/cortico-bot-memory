@@ -109,6 +109,28 @@ export class FactStore {
     return (this.data[scope] ?? []).length;
   }
 
+  /** 列出全部 scope(用于清理/排查污染)。 */
+  listScopes(): string[] {
+    return Object.keys(this.data);
+  }
+
+  /** 删除指定 scope 的全部事实;返回删除条数(空数组安全不删)。 */
+  purge(scopes: string[]): number {
+    const set = new Set(scopes.map((s) => s.trim()).filter(Boolean));
+    if (!set.size) return 0;
+    let removed = 0;
+    for (const s of set) {
+      const list = this.data[s];
+      if (list && list.length) {
+        removed += list.length;
+        delete this.data[s];
+        this.dirty = true;
+      }
+    }
+    if (removed) this.saveNow();
+    return removed;
+  }
+
   /**
    * 跨 scope 召回:扫描全部 scope 的事实,按词频打分、按 hash 去重、取 top_k。
    * 用于「自动捕获的对话」与显式事实共存的场景——scope 留空时也能搜到对话域。

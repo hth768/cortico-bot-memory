@@ -176,18 +176,53 @@ export class VectorStore {
     this.versions.set(scope, (this.versions.get(scope) ?? 0) + 1);
   }
 
-  /** 追加一条;vector 为 null 时仅进 BM25 索引。超出上限截掉最旧的。 */
-  add(scope: string, text: string, vector: readonly number[] | null, maxPerScope: number): void {
+  /**
+   * 追加一条;vector 为 null 时仅进 BM25 索引。超出上限截掉最旧的。
+   * 去重:若本 scope 已有「前 200 字相同」的条目,跳过嵌入(避免重复 embed/堆积)。
+   * 返回实际新增条数(0/1)。
+   */
+  add(scope: string, text: string, vector: readonly number[] | null, maxPerScope: number): number {
     const s = scope || 'main';
     const list = (this.data.vectors[s] ??= []);
+    const head = text.slice(0, 200);
+    if (list.some((it) => it.text.slice(0, 200) === head)) {
+      // 命中重复:仍标脏以便空向量条目有机会被回填
+      this.dirty = true;
+      this.scheduleSave();
+      return 0;
+    }
     list.push({
-      text: text.slice(0, 200),
+      text: head,
       vector: vector && vector.length ? encodeVectorFp16(vector) : null,
       timestamp: Date.now() / 1000,
     });
     if (list.length > maxPerScope) this.data.vectors[s] = list.slice(-maxPerScope);
     this.invalidate(s);
     this.scheduleSave(); // 防抖写盘(原为每次 add 都同步 save)
+    return 1;
+  }
+
+  /** 列出尚未嵌入的向量条目(用于后台回填)。 */
+  pendingVectors(limit = 20): Array<{ scope: string; index: number; text: string }> {
+    const out: Array<{ scope: string; index: number; text: string }> = [];
+    for (const [scope, list] of Object.entries(this.data.vectors)) {
+      for (let i = 0; i < list.length; i++) {
+        const it = list[i]!;
+        if (!it.vector) out.push({ scope, index: i, text: it.text });
+        if (out.length >= limit) return out;
+      }
+    }
+    return out;
+  }
+
+  /** 回填:为某条向量写入嵌入(向量或 null = 仅 BM25)。 */
+  setVector(scope: string, index: number, vec: readonly number[] | null): void {
+    const s = scope || 'main';
+    const list = this.data.vectors[s];
+    if (!list || !list[index]) return;
+    list[index]!.vector = vec && vec.length ? encodeVectorFp16(vec) : null;
+    this.invalidate(s);
+    this.scheduleSave();
   }
 
   private matrixFor(scope: string): MatrixCache | null {
