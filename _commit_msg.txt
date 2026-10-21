@@ -1,9 +1,0 @@
-同步 world 版 0.2.5/0.2.6/0.2.7 改动（升 0.2.0）
-
-- fact-store: 新增 listScopes / purge
-- vector-store: add 前200字去重 + pendingVectors / setVector
-- bot-persona: 强化 isInboundUser 黑名单(.self/activity/delivered/desktop-pet.touch/persona)
-- bot-persona: 事实新增才 embed,避免重复 embed 与向量堆积
-- bot-persona: 后台回填 backfillVectors + mem_backfill 工具
-- bot-persona: mem_purge_capture 两步确认清理污染
-- bot-persona: webUi.memory.storage 清理污染按钮(先预览后确认)
